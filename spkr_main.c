@@ -11,6 +11,8 @@
 #include <linux/ioctl.h>
 #include <asm/uaccess.h>
 
+#define FIFO_SIZE 1
+
 MODULE_LICENSE("GPL");
 
 // Prototipos de las funciones
@@ -21,13 +23,12 @@ static int spkr_open(struct inode *i, struct file *f);
 static int spkr_release(struct inode *i, struct file *f);
 static ssize_t spkr_write(struct file *f, const char __user *buf, size_t len, loff_t *off);
 
+// Variables globales
 static dev_t dev = 0; // esto es para que el SO asigne dinamicamente el major number
 static int minor = 0; // minor number
-static struct cdev c_dev; //  
+static struct cdev c_dev; // Estructura de datos para el dispositivo
 static struct class *cl; // Clase del dispositivo
-
-// Parametros de entrada
-module_param(minor, int, S_IRUGO);
+static DECLARE_KFIFO_PTR(spkr_fifo, int); // Cola de datos para el dispositivo
 
 // Estrucutra de datos para las funciones de acceso al dispositivo
 static struct file_operations fops =
@@ -38,17 +39,39 @@ static struct file_operations fops =
     .write = spkr_write,
 };
 
+// Parametros de entrada
+module_param(minor, int, S_IRUGO);
 
 // Funciones de acceso al dispositivo
 static int spkr_open(struct inode *i, struct file *f)
 {
-    printk(KERN_INFO "spkr: Dispositivo abierto\n");
+    int tmp = 1; // Valor por defecto para insertar en la cola
+
+    if ((f->f_flags & FMODE_WRITE)) {
+        return -EPERM;
+    }
+
+    if (!kfifo_is_empty(&spkr_fifo)) {
+        return -EBUSY;
+    }
+
+    if ((kfifo_in(&spkr_fifo, &tmp, sizeof(tmp))) != sizeof(tmp)) {
+        return -EFAULT;
+    }
+
+    printk(KERN_INFO "spkr: Device opened\n");
     return 0;
 }
 
 static int spkr_release(struct inode *i, struct file *f)
 {
-    printk(KERN_INFO "spkr: Dispositivo liberado\n");
+    int tmp; // Valor por defecto para insertar en la cola
+
+    if ((kfifo_out(&spkr_fifo, &tmp, sizeof(tmp))) != sizeof(tmp)) {
+        return -EFAULT;
+    }
+
+    printk(KERN_INFO "spkr: Device released\n");
     return 0;
 }
 
