@@ -3,6 +3,7 @@
 #include <linux/version.h>
 #include <linux/cdev.h>
 #include <linux/device.h>
+#include <linux/slab.h>
 #include <linux/fs.h>
 #include <linux/wait.h>
 #include <linux/sched.h>
@@ -16,9 +17,10 @@ extern void set_spkr_frequency(unsigned int frequency);
 extern void spkr_on(void);
 extern void spkr_off(void);
 
-static dev_t dev = 0; // This will hold the major number that the kernel gives us
-static struct cdev c_dev; // This is the cdev structure
+static dev_t dev = 0; // esto es para que el SO asigne dinamicamente el major number
+static struct cdev c_dev; // esto 
 static struct class *cl; // This will be used later for sysfs
+
 
 static int spkr_open(struct inode *i, struct file *f)
 {
@@ -62,7 +64,21 @@ static int __init spkr_init(void)
     {
         return ret;
     }
+   
+    if (IS_ERR(cl = class_create(THIS_MODULE, "speaker")))
+    {
+        cdev_del(&c_dev);
+        unregister_chrdev_region(dev, 1);
+        return PTR_ERR(cl);
+    }
 
+    if (IS_ERR(dev_ret = device_create(cl, NULL, dev, NULL, "spkr%d", MINOR(dev))))
+    {
+        class_destroy(cl);
+        cdev_del(&c_dev);
+        unregister_chrdev_region(dev, 1);
+        return PTR_ERR(dev_ret);
+    }
 
     return 0;
 }
