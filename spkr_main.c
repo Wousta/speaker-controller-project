@@ -27,13 +27,18 @@ extern void spkr_off(void);
 static int spkr_open(struct inode *i, struct file *f);
 static int spkr_release(struct inode *i, struct file *f);
 static ssize_t spkr_write(struct file *f, const char __user *buf, size_t len, loff_t *off);
+static ssize_t spkr_write_unbuffered(struct file *f, const char __user *buf, size_t len, loff_t *off);
+static void spkr_timer_callback(struct timer_list *t);
 
 // Variables globales
+static int write_count = 0; // Contador de escrituras
+static int duration = 0; // Duracion del sonido
+static int frequency = 0; // Frecuencia del sonido
 static dev_t dev = 0; // esto es para que el SO asigne dinamicamente el major number
 static int minor = 0; // minor number
 static struct cdev c_dev; // Estructura de datos para el dispositivo
 static struct class *cl; // Clase del dispositivo
-static DECLARE_KFIFO_PTR(spkr_fifo, char); // Cola de datos para el dispositivo
+static struct mutex mutex; // Mutex para proteger el acceso al dispositivo
 
 // Estrucutra de datos para las funciones de acceso al dispositivo
 static struct file_operations fops =
@@ -44,7 +49,15 @@ static struct file_operations fops =
     .write = spkr_write,
 };
 
-
+// Estructura de informacion del dispositivo
+static struct info_dispo {
+    wait_queue_head_t wait_queue;
+    struct timer_list timer;
+    // char *sound_buffer; // Buffer to store the sounds
+    // size_t sound_size; // Size of the sound buffer
+    // size_t sound_index; // Index of the current sound
+    // spinlock_t lock; // Spinlock for protecting against software interrupts
+}info;
 
 // Parametros de entrada
 module_param(minor, int, S_IRUGO);
@@ -52,43 +65,45 @@ module_param(minor, int, S_IRUGO);
 // Funciones de acceso al dispositivo
 static int spkr_open(struct inode *i, struct file *f)
 {
-    char tmp = 'a'; // Valor por defecto para insertar en la cola
+    mutex_lock(&mutex);
 
-    if ((f->f_flags & FMODE_WRITE)) {
-        printk(KERN_INFO "spkr: spkr_open EPERM\n");
-        return -EPERM;
-    }
-
-    if (!kfifo_is_empty(&spkr_fifo)) {
-        printk(KERN_INFO "spkr: spkr_open EBUSY\n");
+    if(f->f_mode & FMODE_WRITE && write_count != 0) {
+        printk(KERN_ERR "spkr: Dispositivo ocupado");
+        mutex_unlock(&mutex);
         return -EBUSY;
     }
-
     
-    if ((kfifo_in(&spkr_fifo, &tmp, sizeof(tmp))) != sizeof(tmp)) {
-        printk(KERN_INFO "spkr: spkr_open EFAULT\n");
-        return -EFAULT;
+    if(f->f_mode & FMODE_WRITE) {
+        write_count++;
     }
+    
+    printk(KERN_INFO "spkr: Dispositivo abierto");
 
-    printk(KERN_INFO "spkr: Dispositivo abierto\n");
+    mutex_unlock(&mutex);
+
     return 0;
 }
 
 static int spkr_release(struct inode *i, struct file *f)
 {
-    char tmp; // Valor por defecto para insertar en la cola
+    mutex_lock(&mutex);
 
-    if ((kfifo_out(&spkr_fifo, &tmp, sizeof(tmp))) != sizeof(tmp)) {
-        return -EFAULT;
+    if(f->f_mode & FMODE_WRITE) {
+        write_count--;
     }
 
     printk(KERN_INFO "spkr: Dispositivo liberado\n");
+
+    mutex_unlock(&mutex);
+
     return 0;
 }
 
 static ssize_t spkr_write(struct file *f, const char __user *buf, size_t len, loff_t *off)
 {
+    ssize_t ret;
     printk(KERN_INFO "spkr: Escribiendo en el dispositivo\n");
+    ret = spkr_write_unbuffered(f, buf, len, off);
     return len;
 }
 
@@ -134,6 +149,9 @@ static int __init spkr_init(void)
     }
     printk(KERN_INFO "spkr: Dispositivo dado de alta en el sistema de archivos correctamente");
 
+    // Iniciar mutex
+    mutex_init(&mutex);
+
     return 0;
 }
 
@@ -144,6 +162,19 @@ static void __exit spkr_exit(void)
     cdev_del(&c_dev);
     unregister_chrdev_region(dev, 1);
 }
+
+// Timer callback function
+static void spkr_timer_callback(struct timer_list *t)
+{
+
+}
+
+// Write function
+static ssize_t spkr_write_unbuffered(struct file *f, const char __user *buf, size_t len, loff_t *off)
+{
+    return 0;
+}
+
 
 module_exit(spkr_exit);
 module_init(spkr_init);
