@@ -1,3 +1,8 @@
+/*
+Integrantes del grupo:
+    - Luis Bustamante Martin-Ibañez
+    - Ignacio Hidalgo Power
+*/
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/version.h>
@@ -38,6 +43,8 @@ static struct file_operations fops =
     .release = spkr_release,
     .write = spkr_write,
 };
+
+
 
 // Parametros de entrada
 module_param(minor, int, S_IRUGO);
