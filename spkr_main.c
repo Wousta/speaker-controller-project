@@ -28,7 +28,7 @@ static dev_t dev = 0; // esto es para que el SO asigne dinamicamente el major nu
 static int minor = 0; // minor number
 static struct cdev c_dev; // Estructura de datos para el dispositivo
 static struct class *cl; // Clase del dispositivo
-static DECLARE_KFIFO_PTR(spkr_fifo, int); // Cola de datos para el dispositivo
+static DECLARE_KFIFO_PTR(spkr_fifo, char); // Cola de datos para el dispositivo
 
 // Estrucutra de datos para las funciones de acceso al dispositivo
 static struct file_operations fops =
@@ -45,7 +45,7 @@ module_param(minor, int, S_IRUGO);
 // Funciones de acceso al dispositivo
 static int spkr_open(struct inode *i, struct file *f)
 {
-    int tmp = 1; // Valor por defecto para insertar en la cola
+    char tmp = 'a'; // Valor por defecto para insertar en la cola
 
     if ((f->f_flags & FMODE_WRITE)) {
         printk(KERN_INFO "spkr: spkr_open EPERM\n");
@@ -69,7 +69,7 @@ static int spkr_open(struct inode *i, struct file *f)
 
 static int spkr_release(struct inode *i, struct file *f)
 {
-    int tmp; // Valor por defecto para insertar en la cola
+    char tmp; // Valor por defecto para insertar en la cola
 
     if ((kfifo_out(&spkr_fifo, &tmp, sizeof(tmp))) != sizeof(tmp)) {
         return -EFAULT;
