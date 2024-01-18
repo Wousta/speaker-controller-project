@@ -48,18 +48,22 @@ static int spkr_open(struct inode *i, struct file *f)
     int tmp = 1; // Valor por defecto para insertar en la cola
 
     if ((f->f_flags & FMODE_WRITE)) {
+        printk(KERN_INFO "spkr: spkr_open EPERM\n");
         return -EPERM;
     }
 
     if (!kfifo_is_empty(&spkr_fifo)) {
+        printk(KERN_INFO "spkr: spkr_open EBUSY\n");
         return -EBUSY;
     }
 
+    
     if ((kfifo_in(&spkr_fifo, &tmp, sizeof(tmp))) != sizeof(tmp)) {
+        printk(KERN_INFO "spkr: spkr_open EFAULT\n");
         return -EFAULT;
     }
 
-    printk(KERN_INFO "spkr: Device opened\n");
+    printk(KERN_INFO "spkr: Dispositivo abierto\n");
     return 0;
 }
 
@@ -71,7 +75,7 @@ static int spkr_release(struct inode *i, struct file *f)
         return -EFAULT;
     }
 
-    printk(KERN_INFO "spkr: Device released\n");
+    printk(KERN_INFO "spkr: Dispositivo liberado\n");
     return 0;
 }
 
@@ -109,6 +113,7 @@ static int __init spkr_init(void)
     {
         cdev_del(&c_dev);
         unregister_chrdev_region(dev, 1);
+        printk(KERN_ALERT "Error al registrar el dispositivo en el sistema de archivos\n");
         return PTR_ERR(cl);
     }
 
