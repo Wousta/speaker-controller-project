@@ -40,8 +40,7 @@ static struct class *cl; // Clase del dispositivo
 static struct mutex mutex; // Mutex para proteger el acceso al dispositivo
 
 // Estrucutra de datos para las funciones de acceso al dispositivo
-static struct file_operations fops =
-{
+static struct file_operations fops = {
     .owner = THIS_MODULE,
     .open = spkr_open,
     .release = spkr_release,
@@ -63,18 +62,18 @@ static int spkr_open(struct inode *i, struct file *f)
 {
     mutex_lock(&mutex);
 
-    if(f->f_mode & FMODE_WRITE && write_count != 0) {
+    if(f->f_mode & FMODE_WRITE && write_count != 0) 
+    {
         printk(KERN_ERR "spkr: Dispositivo ocupado");
         mutex_unlock(&mutex);
         return -EBUSY;
     }
     
-    if(f->f_mode & FMODE_WRITE) {
+    if(f->f_mode & FMODE_WRITE) 
+    {
         write_count++;
     }
-    
     printk(KERN_INFO "spkr: Dispositivo abierto");
-
     mutex_unlock(&mutex);
 
     return 0;
@@ -84,12 +83,12 @@ static int spkr_release(struct inode *i, struct file *f)
 {
     mutex_lock(&mutex);
 
-    if(f->f_mode & FMODE_WRITE) {
+    if(f->f_mode & FMODE_WRITE) 
+    {
         write_count--;
-    }
+    } 
 
     printk(KERN_INFO "spkr: Dispositivo liberado\n");
-
     mutex_unlock(&mutex);
 
     return 0;
@@ -113,7 +112,6 @@ static int __init spkr_init(void)
     {
         return ret;
     }
-
     printk(KERN_INFO "spkr: Major number: %d, Minor number: %d\n", MAJOR(dev), MINOR(dev));
 
     cdev_init(&c_dev, &fops);
@@ -147,7 +145,6 @@ static int __init spkr_init(void)
 
     // Iniciar mutex
     mutex_init(&mutex);
-
     init_waitqueue_head(&info_dispo.wait_queue);
 
     return 0;
@@ -162,52 +159,79 @@ static void __exit spkr_exit(void)
 }
 
 // Fin timer sin buffer interno
-static void timer_callback(struct timer_list *timer) {
+static void spkr_timer_callback(struct timer_list *timer) 
+{
 
     spin_lock_bh(&info_dispo.lock);
-
     wake_up_interruptible(&info_dispo.wait_queue);
-
     spin_unlock_bh(&info_dispo.lock);
 }
 
 // Write function
 static ssize_t spkr_write_unbuffered(struct file *f, const char __user *buf, size_t count, loff_t *off)
 {
-    printk(KERN_INFO "spkr: Escribiendo en el dispositivo sin buffer interno\n");
-    uint16_t duracion;
-    uint16_t frecuencia;
-
-    if(count % 4 != 0) {
+    if(count % 4 != 0) 
+    {
         printk(KERN_ERR "spkr: Error en el formato de los datos, se debe cumplir bs*count multiplo de 4\n");
         return -EINVAL;
     }
 
+    printk(KERN_INFO "spkr: Escribiendo en el dispositivo sin buffer interno\n");
+    uint16_t duracion;
+    uint16_t frecuencia;
+    int speaker_on = 0;
+
     // Cada 4 bytes leidos contienen 2 bytes con la duracion del tono y 2 bytes con la frecuencia
     // Hay que leerlos de 2 en 2 hasta que se lean todos los bytes
     // Si la frecuencia es 0, se apaga el altavoz durante la duracion especificada
-    for(int i = 0; i < count; i += 4) {
+    int i;
+    for(i = 0; i < count; i += 4) 
+    {
         // Leer duracion
-        if(copy_from_user(&duracion, buf + i, 2)) {
+        if(copy_from_user(&duracion, buf + i, 2)) 
+        {
             printk(KERN_ERR "spkr: Error al leer la duracion\n");
             return -EFAULT;
         }
         printk(KERN_INFO "spkr: Duracion: %d\n", duracion);
+
         // Leer frecuencia
-        if(copy_from_user(&frecuencia, buf + i + 2, 2)) {
+        if(copy_from_user(&frecuencia, buf + i + 2, 2)) 
+        {
             printk(KERN_ERR "spkr: Error al leer la frecuencia\n");
             return -EFAULT;
         }
         printk(KERN_INFO "spkr: Frecuencia: %d\n", frecuencia);
 
         // Si la frecuencia no es 0, se enciende el altavoz con la frecuencia especificada
-        if(frecuencia) {
+        if(frecuencia) 
+        {
+            speaker_on = 1;
             set_spkr_frequency(frecuencia);
             spkr_on();
         }
-        
-    }
+        else 
+        {
+            speaker_on = 0;
+            spkr_off();
+        }
+        // Esperar duracion usando el timer de info_dispo y el callback
+        info_dispo.timer.expires = jiffies + msecs_to_jiffies(duracion);
+        timer_setup(&info_dispo.timer, spkr_timer_callback, 0);
+        add_timer(&info_dispo.timer);
 
+        if(wait_event_interruptible(info_dispo.wait_queue, timer_pending(&info_dispo.timer) == 0)) 
+        {
+            printk(KERN_INFO "spkr: wait condition en spkr_write_unbuffered\n");
+            return -ERESTARTSYS;
+        }
+    }
+    // Si el altavoz se ha quedado encendido, apagarlo
+    if(speaker_on) 
+    {
+        spkr_off();
+    }
+    printk(KERN_INFO "spkr: Escritura finalizada, bytes leidos=%d\n", i);
     return count;
 }
 
