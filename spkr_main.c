@@ -26,16 +26,15 @@ extern void spkr_on(void);
 extern void spkr_off(void);
 static int spkr_open(struct inode *i, struct file *f);
 static int spkr_release(struct inode *i, struct file *f);
-static ssize_t spkr_write(struct file *f, const char __user *buf, size_t len, loff_t *off);
-static ssize_t spkr_write_unbuffered(struct file *f, const char __user *buf, size_t len, loff_t *off);
+static ssize_t spkr_write(struct file *f, const char __user *buf, size_t count, loff_t *off);
+static ssize_t spkr_write_unbuffered(struct file *f, const char __user *buf, size_t count, loff_t *off);
 static void spkr_timer_callback(struct timer_list *t);
 
 // Variables globales
 static int write_count = 0; // Contador de escrituras
-static int duration = 0; // Duracion del sonido
-static int frequency = 0; // Frecuencia del sonido
 static dev_t dev = 0; // esto es para que el SO asigne dinamicamente el major number
 static int minor = 0; // minor number
+
 static struct cdev c_dev; // Estructura de datos para el dispositivo
 static struct class *cl; // Clase del dispositivo
 static struct mutex mutex; // Mutex para proteger el acceso al dispositivo
@@ -53,11 +52,8 @@ static struct file_operations fops =
 static struct info_dispo {
     wait_queue_head_t wait_queue;
     struct timer_list timer;
-    // char *sound_buffer; // Buffer to store the sounds
-    // size_t sound_size; // Size of the sound buffer
-    // size_t sound_index; // Index of the current sound
-    // spinlock_t lock; // Spinlock for protecting against software interrupts
-}info;
+    spinlock_t lock; // Spinlock for protecting against software interrupts
+}info_dispo;
 
 // Parametros de entrada
 module_param(minor, int, S_IRUGO);
@@ -99,12 +95,12 @@ static int spkr_release(struct inode *i, struct file *f)
     return 0;
 }
 
-static ssize_t spkr_write(struct file *f, const char __user *buf, size_t len, loff_t *off)
+static ssize_t spkr_write(struct file *f, const char __user *buf, size_t count, loff_t *off)
 {
     ssize_t ret;
     printk(KERN_INFO "spkr: Escribiendo en el dispositivo\n");
-    ret = spkr_write_unbuffered(f, buf, len, off);
-    return len;
+    ret = spkr_write_unbuffered(f, buf, count, off);
+    return count;
 }
 
 static int __init spkr_init(void)
@@ -152,6 +148,8 @@ static int __init spkr_init(void)
     // Iniciar mutex
     mutex_init(&mutex);
 
+    init_waitqueue_head(&info_dispo.wait_queue);
+
     return 0;
 }
 
@@ -163,18 +161,55 @@ static void __exit spkr_exit(void)
     unregister_chrdev_region(dev, 1);
 }
 
-// Timer callback function
-static void spkr_timer_callback(struct timer_list *t)
-{
+// Fin timer sin buffer interno
+static void timer_callback(struct timer_list *timer) {
 
+    spin_lock_bh(&info_dispo.lock);
+
+    wake_up_interruptible(&info_dispo.wait_queue);
+
+    spin_unlock_bh(&info_dispo.lock);
 }
 
 // Write function
-static ssize_t spkr_write_unbuffered(struct file *f, const char __user *buf, size_t len, loff_t *off)
+static ssize_t spkr_write_unbuffered(struct file *f, const char __user *buf, size_t count, loff_t *off)
 {
-    return 0;
-}
+    printk(KERN_INFO "spkr: Escribiendo en el dispositivo sin buffer interno\n");
+    uint16_t duracion;
+    uint16_t frecuencia;
 
+    if(count % 4 != 0) {
+        printk(KERN_ERR "spkr: Error en el formato de los datos, se debe cumplir bs*count multiplo de 4\n");
+        return -EINVAL;
+    }
+
+    // Cada 4 bytes leidos contienen 2 bytes con la duracion del tono y 2 bytes con la frecuencia
+    // Hay que leerlos de 2 en 2 hasta que se lean todos los bytes
+    // Si la frecuencia es 0, se apaga el altavoz durante la duracion especificada
+    for(int i = 0; i < count; i += 4) {
+        // Leer duracion
+        if(copy_from_user(&duracion, buf + i, 2)) {
+            printk(KERN_ERR "spkr: Error al leer la duracion\n");
+            return -EFAULT;
+        }
+        printk(KERN_INFO "spkr: Duracion: %d\n", duracion);
+        // Leer frecuencia
+        if(copy_from_user(&frecuencia, buf + i + 2, 2)) {
+            printk(KERN_ERR "spkr: Error al leer la frecuencia\n");
+            return -EFAULT;
+        }
+        printk(KERN_INFO "spkr: Frecuencia: %d\n", frecuencia);
+
+        // Si la frecuencia no es 0, se enciende el altavoz con la frecuencia especificada
+        if(frecuencia) {
+            set_spkr_frequency(frecuencia);
+            spkr_on();
+        }
+        
+    }
+
+    return count;
+}
 
 module_exit(spkr_exit);
 module_init(spkr_init);
