@@ -29,11 +29,11 @@ static int spkr_release(struct inode *i, struct file *f);
 static ssize_t spkr_write(struct file *f, const char __user *buf, size_t count, loff_t *off);
 static ssize_t spkr_write_unbuffered(struct file *f, const char __user *buf, size_t count, loff_t *off);
 static void spkr_timer_callback(struct timer_list *t);
+static ssize_t spkr_write_buffered(struct file *f, const char __user *buf, size_t count, loff_t *off);
 
 // Variables globales
 static int write_count = 0; // Contador de escrituras
 static dev_t dev = 0; // esto es para que el SO asigne dinamicamente el major number
-static int minor = 0; // minor number
 
 static struct cdev c_dev; // Estructura de datos para el dispositivo
 static struct class *cl; // Clase del dispositivo
@@ -54,10 +54,15 @@ static struct info_dispo {
     char buffer[4];  // Buffer para datos entrantes
     size_t buffer_index;  // Numero de bytes actualmente en el buffer
     spinlock_t lock; // Spinlock for protecting against software interrupts
+    struct kfifo kfifo; // para la escritura con buffer interno
 }info_dispo;
 
 // Parametros de entrada
+static int minor = 0; // minor number
 module_param(minor, int, S_IRUGO);
+static int buffer_length = 0; // longitud del buffer
+module_param(buffer_length, int, S_IRUGO);
+
 
 // Funciones de acceso al dispositivo
 static int spkr_open(struct inode *i, struct file *f)
@@ -99,9 +104,12 @@ static int spkr_release(struct inode *i, struct file *f)
 static ssize_t spkr_write(struct file *f, const char __user *buf, size_t count, loff_t *off)
 {
     ssize_t ret;
-    printk(KERN_INFO "spkr: Escribiendo en el dispositivo\n");
-    ret = spkr_write_unbuffered(f, buf, count, off);
-    return count;
+    printk(KERN_INFO "spkr: llamada a spkr_write\n");
+    
+    if(buffer_length == 0) ret = spkr_write_unbuffered(f, buf, count, off);
+    else ret = spkr_write_buffered(f, buf, count, off);
+
+    return ret;
 }
 
 static int __init spkr_init(void)
@@ -145,15 +153,29 @@ static int __init spkr_init(void)
     }
     printk(KERN_INFO "spkr: Dispositivo dado de alta en el sistema de archivos correctamente");
 
-    // Iniciar mutex
+    // Se inicia el mutex de las operaciones de acceso al dispositivo
     mutex_init(&mutex);
+    
+    // Se inicializa la estructura de informacion del dispositivo
     init_waitqueue_head(&info_dispo.wait_queue);
+    info_dispo.buffer_index = 0;
+    spin_lock_init(&info_dispo.lock);
+    if(buffer_length != 0) 
+    {
+        if(kfifo_alloc(&info_dispo.kfifo, buffer_length, GFP_KERNEL)) 
+        {
+            printk(KERN_ERR "spkr: Error al inicializar la kfifo\n");
+            return -ENOMEM;
+        }
+    }
 
     return 0;
 }
 
 static void __exit spkr_exit(void)
 {
+    printk(KERN_INFO "spkr: Desinstalando modulo\n");
+    if(buffer_length != 0) kfifo_free(&info_dispo.kfifo);
     device_destroy(cl, dev);
     class_destroy(cl);
     cdev_del(&c_dev);
@@ -231,6 +253,13 @@ static ssize_t spkr_write_unbuffered(struct file *f, const char __user *buf, siz
     }
     printk(KERN_INFO "spkr: Escritura finalizada, bytes leidos=%d\n", i);
     return count;
+}
+
+// Funcion de escritura con buffer interno
+static ssize_t spkr_write_buffered(struct file *f, const char __user *buf, size_t count, loff_t *off)
+{
+    // TODO
+    return 0;
 }
 
 module_exit(spkr_exit);
