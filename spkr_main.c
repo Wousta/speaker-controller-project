@@ -51,6 +51,8 @@ static struct file_operations fops = {
 static struct info_dispo {
     wait_queue_head_t wait_queue;
     struct timer_list timer;
+    char buffer[4];  // Buffer para datos entrantes
+    size_t buffer_index;  // Numero de bytes actualmente en el buffer
     spinlock_t lock; // Spinlock for protecting against software interrupts
 }info_dispo;
 
@@ -167,15 +169,9 @@ static void spkr_timer_callback(struct timer_list *timer)
     spin_unlock_bh(&info_dispo.lock);
 }
 
-// Write function
+// Funcion de escritura sin buffer interno
 static ssize_t spkr_write_unbuffered(struct file *f, const char __user *buf, size_t count, loff_t *off)
 {
-    if(count % 4 != 0) 
-    {
-        printk(KERN_ERR "spkr: Error en el formato de los datos, se debe cumplir bs*count multiplo de 4\n");
-        return -EINVAL;
-    }
-
     printk(KERN_INFO "spkr: Escribiendo en el dispositivo sin buffer interno\n");
     uint16_t duracion;
     uint16_t frecuencia;
@@ -185,46 +181,48 @@ static ssize_t spkr_write_unbuffered(struct file *f, const char __user *buf, siz
     // Hay que leerlos de 2 en 2 hasta que se lean todos los bytes
     // Si la frecuencia es 0, se apaga el altavoz durante la duracion especificada
     int i;
-    for(i = 0; i < count; i += 4) 
+    for(i = 0; i < count; i ++) 
     {
+        if(copy_from_user(&info_dispo.buffer[info_dispo.buffer_index++], &buf[i], 1)) 
+        {
+            printk(KERN_ERR "spkr: Error al leer el byte\n");
+            return -EFAULT;
+        }
         // Leer duracion
-        if(copy_from_user(&duracion, buf + i, 2)) 
+        if(info_dispo.buffer_index == 4)
         {
-            printk(KERN_ERR "spkr: Error al leer la duracion\n");
-            return -EFAULT;
-        }
-        printk(KERN_INFO "spkr: Duracion: %d\n", duracion);
+            duracion = *(uint16_t*)info_dispo.buffer;
+            printk(KERN_INFO "spkr: Duracion: %d\n", duracion);
 
-        // Leer frecuencia
-        if(copy_from_user(&frecuencia, buf + i + 2, 2)) 
-        {
-            printk(KERN_ERR "spkr: Error al leer la frecuencia\n");
-            return -EFAULT;
-        }
-        printk(KERN_INFO "spkr: Frecuencia: %d\n", frecuencia);
+            // Leer frecuencia
+            frecuencia = *(uint16_t*)(info_dispo.buffer + 2);
+            printk(KERN_INFO "spkr: Frecuencia: %d\n", frecuencia);
 
-        // Si la frecuencia no es 0, se enciende el altavoz con la frecuencia especificada
-        if(frecuencia) 
-        {
-            speaker_on = 1;
-            set_spkr_frequency(frecuencia);
-            spkr_on();
-        }
-        else 
-        {
-            speaker_on = 0;
-            spkr_off();
-        }
-        // Esperar duracion usando el timer de info_dispo y el callback
-        info_dispo.timer.expires = jiffies + msecs_to_jiffies(duracion);
-        timer_setup(&info_dispo.timer, spkr_timer_callback, 0);
-        add_timer(&info_dispo.timer);
+            // Si la frecuencia no es 0, se enciende el altavoz con la frecuencia especificada
+            if(frecuencia && !speaker_on) 
+            {
+                speaker_on = 1;
+                set_spkr_frequency(frecuencia);
+                spkr_on();
+            }
+            else 
+            {
+                speaker_on = 0;
+                spkr_off();
+            }
+            // Esperar duracion usando el timer de info_dispo y el callback
+            info_dispo.timer.expires = jiffies + msecs_to_jiffies(duracion);
+            timer_setup(&info_dispo.timer, spkr_timer_callback, 0);
+            add_timer(&info_dispo.timer);
 
-        if(wait_event_interruptible(info_dispo.wait_queue, timer_pending(&info_dispo.timer) == 0)) 
-        {
-            printk(KERN_INFO "spkr: wait condition en spkr_write_unbuffered\n");
-            return -ERESTARTSYS;
-        }
+            if(wait_event_interruptible(info_dispo.wait_queue, timer_pending(&info_dispo.timer) == 0)) 
+            {
+                printk(KERN_INFO "spkr: wait condition en spkr_write_unbuffered\n");
+                return -ERESTARTSYS;
+            }
+
+            info_dispo.buffer_index = 0;
+        }    
     }
     // Si el altavoz se ha quedado encendido, apagarlo
     if(speaker_on) 
