@@ -30,10 +30,12 @@ static ssize_t spkr_write(struct file *f, const char __user *buf, size_t count, 
 static ssize_t spkr_write_unbuffered(struct file *f, const char __user *buf, size_t count, loff_t *off);
 static void spkr_timer_callback(struct timer_list *t);
 static ssize_t spkr_write_buffered(struct file *f, const char __user *buf, size_t count, loff_t *off);
+int spkr_program_sound(u16 duracion, u16 frecuencia);
 
 // Variables globales
 static int write_count = 0; // Contador de escrituras
 static dev_t dev = 0; // esto es para que el SO asigne dinamicamente el major number
+static int speaker_on = 0; // Flag para saber si el altavoz esta encendido
 
 static struct cdev c_dev; // Estructura de datos para el dispositivo
 static struct class *cl; // Clase del dispositivo
@@ -182,25 +184,13 @@ static void __exit spkr_exit(void)
     unregister_chrdev_region(dev, 1);
 }
 
-// Fin timer sin buffer interno
-static void spkr_timer_callback(struct timer_list *timer) 
-{
-
-    spin_lock_bh(&info_dispo.lock);
-    wake_up_interruptible(&info_dispo.wait_queue);
-    spin_unlock_bh(&info_dispo.lock);
-}
-
 // Funcion de escritura sin buffer interno
 static ssize_t spkr_write_unbuffered(struct file *f, const char __user *buf, size_t count, loff_t *off)
 {
     printk(KERN_INFO "spkr: Escribiendo en el dispositivo sin buffer interno\n");
-    uint16_t duracion;
-    uint16_t frecuencia;
-    int speaker_on = 0;
+    u16 *sound_as_u16;
 
-    // Cada 4 bytes leidos contienen 2 bytes con la duracion del tono y 2 bytes con la frecuencia
-    // Hay que leerlos de 2 en 2 hasta que se lean todos los bytes
+    // Cada 4 bytes leidos contienen 2 bytes con la duracion del sonido y 2 bytes con la frecuencia
     // Si la frecuencia es 0, se apaga el altavoz durante la duracion especificada
     int i;
     for(i = 0; i < count; i ++) 
@@ -213,44 +203,15 @@ static ssize_t spkr_write_unbuffered(struct file *f, const char __user *buf, siz
         // Leer duracion
         if(info_dispo.buffer_index == 4)
         {
-            duracion = *(uint16_t*)info_dispo.buffer;
-            printk(KERN_INFO "spkr: Duracion: %d\n", duracion);
-
-            // Leer frecuencia
-            frecuencia = *(uint16_t*)(info_dispo.buffer + 2);
-            printk(KERN_INFO "spkr: Frecuencia: %d\n", frecuencia);
-
-            // Si la frecuencia no es 0, se enciende el altavoz con la frecuencia especificada
-            if(frecuencia && !speaker_on) 
-            {
-                speaker_on = 1;
-                set_spkr_frequency(frecuencia);
-                spkr_on();
-            }
-            else 
-            {
-                speaker_on = 0;
-                spkr_off();
-            }
-            // Esperar duracion usando el timer de info_dispo y el callback
-            info_dispo.timer.expires = jiffies + msecs_to_jiffies(duracion);
-            timer_setup(&info_dispo.timer, spkr_timer_callback, 0);
-            add_timer(&info_dispo.timer);
-
-            if(wait_event_interruptible(info_dispo.wait_queue, timer_pending(&info_dispo.timer) == 0)) 
-            {
-                printk(KERN_INFO "spkr: wait condition en spkr_write_unbuffered\n");
-                return -ERESTARTSYS;
-            }
+            sound_as_u16 = (u16 *)info_dispo.buffer;
+            spkr_program_sound(sound_as_u16[0], sound_as_u16[1]);
 
             info_dispo.buffer_index = 0;
         }    
     }
     // Si el altavoz se ha quedado encendido, apagarlo
-    if(speaker_on) 
-    {
-        spkr_off();
-    }
+    if(speaker_on) spkr_off();
+
     printk(KERN_INFO "spkr: Escritura finalizada, bytes leidos=%d\n", i);
     return count;
 }
@@ -258,8 +219,88 @@ static ssize_t spkr_write_unbuffered(struct file *f, const char __user *buf, siz
 // Funcion de escritura con buffer interno
 static ssize_t spkr_write_buffered(struct file *f, const char __user *buf, size_t count, loff_t *off)
 {
-    // TODO
+    int ret;
+    unsigned int copied;
+
+    printk(KERN_INFO "spkr: Escribiendo en el dispositivo con buffer interno\n");
+    printk(KERN_INFO "spkr: Buffer length: %d\n", buffer_length);
+    printk(KERN_INFO "spkr: Count: %li\n", count);
+
+    int iteraciones = 0;
+    for(int i = 0; i < count; i += buffer_length) {
+        unsigned int bytes_to_copy = min(buffer_length, (int)(count - i));
+        printk(KERN_INFO "spkr: Copiando %d bytes a la kfifo\n", bytes_to_copy);
+
+        if(kfifo_from_user(&info_dispo.kfifo, buf + i, bytes_to_copy, &copied)) 
+        {
+            printk(KERN_ERR "spkr: Error al copiar los datos a la kfifo\n");
+            return -EFAULT;
+        }
+        printk(KERN_INFO "spkr: Copiados %d bytes a la kfifo\n", copied);
+
+        char sound[4]; // Buffer to hold one sound (4 bytes)
+        u16 *sound_as_u16;
+
+        // Recorremos el buffer de la kfifo y escribimos los sonidos
+        while (!kfifo_is_empty(&info_dispo.kfifo)) {
+            // Extract one sound from the kfifo
+            ret = kfifo_out(&info_dispo.kfifo, sound, 4);
+            if (ret != 4) {
+                printk(KERN_ERR "spkr: Error al leer de la kfifo (kfifo_out)\n");
+                break;
+            }
+
+            // Interpret the sound as an array of two u16 values
+            sound_as_u16 = (u16 *)sound;
+
+            // Write the sound (2 bytes for duration and 2 for frequency)
+            spkr_program_sound(sound_as_u16[0], sound_as_u16[1]);
+        }
+        iteraciones++;
+    }
+    if(speaker_on) spkr_off();
+
+    printk(KERN_INFO "spkr: Escritura finalizada con buffer, veces leidas=%d\n", iteraciones);
+
+    return copied;
+}
+
+int spkr_program_sound(u16 duracion, u16 frecuencia) {
+    // Si la frecuencia no es 0, se enciende el altavoz con la frecuencia especificada
+    printk(KERN_INFO "spkr: Duracion: %d\n", duracion);
+    printk(KERN_INFO "spkr: Frecuencia: %d\n", frecuencia);
+    if(frecuencia && !speaker_on) 
+    {
+        speaker_on = 1;
+        set_spkr_frequency(frecuencia);
+        spkr_on();
+    }
+    else 
+    {
+        speaker_on = 0;
+        spkr_off();
+    }
+
+    // Esperar duracion usando el timer de info_dispo y el callback
+    info_dispo.timer.expires = jiffies + msecs_to_jiffies(duracion);
+    timer_setup(&info_dispo.timer, spkr_timer_callback, 0);
+    add_timer(&info_dispo.timer);
+
+    if(wait_event_interruptible(info_dispo.wait_queue, timer_pending(&info_dispo.timer) == 0)) 
+    {
+        printk(KERN_INFO "spkr: wait condition en spkr_write_unbuffered\n");
+        return -ERESTARTSYS;
+    }
+
     return 0;
+}
+
+// Fin timer
+static void spkr_timer_callback(struct timer_list *timer) 
+{
+    spin_lock_bh(&info_dispo.lock);
+    wake_up_interruptible(&info_dispo.wait_queue);
+    spin_unlock_bh(&info_dispo.lock);
 }
 
 module_exit(spkr_exit);
