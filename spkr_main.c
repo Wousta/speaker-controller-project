@@ -1,8 +1,3 @@
-/*
-Integrantes del grupo:
-    - Luis Bustamante Martin-Ibañez
-    - Ignacio Hidalgo Power
-*/
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/version.h>
@@ -30,7 +25,8 @@ static ssize_t spkr_write(struct file *f, const char __user *buf, size_t count, 
 static ssize_t spkr_write_unbuffered(struct file *f, const char __user *buf, size_t count, loff_t *off);
 static void spkr_timer_callback(struct timer_list *t);
 static ssize_t spkr_write_buffered(struct file *f, const char __user *buf, size_t count, loff_t *off);
-int spkr_program_sound(u16 duracion, u16 frecuencia);
+static void spkr_timer_callback_buffered(struct timer_list *t);
+int spkr_program_sound(u16 duracion, u16 frecuencia, int mode);
 
 // Variables globales
 static int write_count = 0; // Contador de escrituras
@@ -55,7 +51,8 @@ static struct info_dispo {
     struct timer_list timer;
     char buffer[4];  // Buffer para datos entrantes
     size_t buffer_index;  // Numero de bytes actualmente en el buffer
-    spinlock_t lock; // Spinlock for protecting against software interrupts
+    spinlock_t lock;
+    struct mutex mutex;
     struct kfifo kfifo; // para la escritura con buffer interno
 }info_dispo;
 
@@ -162,6 +159,7 @@ static int __init spkr_init(void)
     init_waitqueue_head(&info_dispo.wait_queue);
     info_dispo.buffer_index = 0;
     spin_lock_init(&info_dispo.lock);
+    mutex_init(&info_dispo.mutex);
     if(buffer_length != 0) 
     {
         if(kfifo_alloc(&info_dispo.kfifo, buffer_length, GFP_KERNEL)) 
@@ -204,14 +202,17 @@ static ssize_t spkr_write_unbuffered(struct file *f, const char __user *buf, siz
         if(info_dispo.buffer_index == 4)
         {
             sound_as_u16 = (u16 *)info_dispo.buffer;
-            spkr_program_sound(sound_as_u16[0], sound_as_u16[1]);
+            spkr_program_sound(sound_as_u16[0], sound_as_u16[1], 0);
 
             info_dispo.buffer_index = 0;
         }    
     }
     // Si el altavoz se ha quedado encendido, apagarlo
-    if(speaker_on) spkr_off();
-
+    if(speaker_on) 
+    {
+        speaker_on = 0;
+        spkr_off();
+    }
     printk(KERN_INFO "spkr: Escritura finalizada, bytes leidos=%d\n", i);
     return count;
 }
@@ -241,6 +242,7 @@ static ssize_t spkr_write_buffered(struct file *f, const char __user *buf, size_
         char sound[4]; // Buffer to hold one sound (4 bytes)
         u16 *sound_as_u16;
 
+        mutex_lock(&info_dispo.mutex);
         // Recorremos el buffer de la kfifo y escribimos los sonidos
         while (!kfifo_is_empty(&info_dispo.kfifo)) {
             // Extract one sound from the kfifo
@@ -254,18 +256,24 @@ static ssize_t spkr_write_buffered(struct file *f, const char __user *buf, size_
             sound_as_u16 = (u16 *)sound;
 
             // Write the sound (2 bytes for duration and 2 for frequency)
-            spkr_program_sound(sound_as_u16[0], sound_as_u16[1]);
+            spkr_program_sound(sound_as_u16[0], sound_as_u16[1], 1);
         }
+
+        mutex_unlock(&info_dispo.mutex);
+
         iteraciones++;
     }
-    if(speaker_on) spkr_off();
-
+    if(speaker_on) 
+    {
+        speaker_on = 0;
+        spkr_off();
+    }
     printk(KERN_INFO "spkr: Escritura finalizada con buffer, veces leidas=%d\n", iteraciones);
 
     return copied;
 }
 
-int spkr_program_sound(u16 duracion, u16 frecuencia) {
+int spkr_program_sound(u16 duracion, u16 frecuencia, int mode) {
     // Si la frecuencia no es 0, se enciende el altavoz con la frecuencia especificada
     printk(KERN_INFO "spkr: Duracion: %d\n", duracion);
     printk(KERN_INFO "spkr: Frecuencia: %d\n", frecuencia);
@@ -283,7 +291,12 @@ int spkr_program_sound(u16 duracion, u16 frecuencia) {
 
     // Esperar duracion usando el timer de info_dispo y el callback
     info_dispo.timer.expires = jiffies + msecs_to_jiffies(duracion);
-    timer_setup(&info_dispo.timer, spkr_timer_callback, 0);
+    if(mode == 0) {
+        timer_setup(&info_dispo.timer, spkr_timer_callback, 0);
+    }
+    else {
+        timer_setup(&info_dispo.timer, spkr_timer_callback_buffered, 0);
+    }
     add_timer(&info_dispo.timer);
 
     if(wait_event_interruptible(info_dispo.wait_queue, timer_pending(&info_dispo.timer) == 0)) 
